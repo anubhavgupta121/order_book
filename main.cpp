@@ -1,6 +1,10 @@
 #include <bits/stdc++.h>
 #include <random>
 #include <variant>
+#include <ext/pb_ds/assoc_container.hpp> // Common file
+#include <ext/pb_ds/tree_policy.hpp>     // Tree-based structures
+
+
 
 using namespace std;
 
@@ -19,12 +23,11 @@ struct Trade{
 
 };
 
-struct Order
-{
+struct Order {
     int id;
-    double price;
     int quantity;
     Side side;
+    bool cancelled;
 };
 
 struct NewOrderRequest{
@@ -43,52 +46,76 @@ struct MarketOrderRequest{
     Side side;
 };
 
+double Min_price = 0;
+double max_price = 105.00;
+double tick_size = 1.0;
 
+
+int conv_price_to_idx(double price){
+     return (price - Min_price)/tick_size;
+}
+double conv_idx_to_price(int idx){
+    return (idx*tick_size) + Min_price;
+}
 int id_gen = 0;
 map<int,Order> Order_info;
-map<double,list<Order*>> ask;
-map<double,list<Order*>,greater<double>> bid;
-unordered_map<int,list<Order*> :: iterator> Order_iterator ;
+vector<vector<Order>> ask(conv_price_to_idx(max_price) + 5 );
+vector<vector<Order>> bid(conv_price_to_idx(max_price) + 5);
+vector<int> ask_actv_count(conv_price_to_idx(max_price) + 5);
+vector<int> bid_actv_count(conv_price_to_idx(max_price) + 5);
+unordered_map<int,pair<double,int>> Order_index;
 
 vector<Trade> Trade_log;
 
 
 using Request = variant<NewOrderRequest, CancelOrderRequest,MarketOrderRequest>;
+int best_ask_indx = 0;
+int best_bid_index = bid.size() - 1;
 
 
 
 int add_order(NewOrderRequest req){
-     Order new_order = {id_gen,req.price,req.quantity,req.side};
+     Order new_order = {id_gen,req.quantity,req.side,false};
      Order_info[new_order.id] = new_order;
     
      if(new_order.side == Side::Bid){
-            bid[new_order.price].push_back(&Order_info[new_order.id]);
-            Order_iterator[new_order.id] = --bid[new_order.price].end();
+            int idx = conv_price_to_idx(req.price);
+            bid[idx].push_back(new_order);
+            Order_index[new_order.id] =  {req.price,bid[idx].size() - 1};
+            bid_actv_count[idx]++;
+            if(idx > best_bid_index || bid[best_bid_index].empty()){
+                best_bid_index = idx;
+            }
+            
      }
      else if(new_order.side == Side::Ask){
-            ask[new_order.price].push_back(&Order_info[new_order.id]);
-            Order_iterator[new_order.id] = --ask[new_order.price].end();
+            int idx = conv_price_to_idx(req.price);
+            ask[idx].push_back(new_order);
+            Order_index[new_order.id] =  {req.price,ask[idx].size() - 1};
+            ask_actv_count[idx]++;
+            if(idx < best_ask_indx || ask[best_ask_indx].empty()){
+                best_ask_indx = idx;
+            }
+            
      }
      return new_order.id;
      
 }
 int cancel_order(CancelOrderRequest req){
+    
     Order to_cancel = Order_info[req.id];
     if(to_cancel.side == Side::Bid){
-        bid[to_cancel.price].erase(Order_iterator[to_cancel.id]);
-        if(bid[to_cancel.price].empty()){
-            bid.erase(to_cancel.price);
-        }
+        auto [price,idx] =  Order_index[req.id];
+        bid[conv_price_to_idx(price)][idx].cancelled = true;
+        bid_actv_count[conv_price_to_idx(price)]--;
     }
     else if(to_cancel.side == Side::Ask){
-        ask[to_cancel.price].erase(Order_iterator[to_cancel.id]);
-        if(ask[to_cancel.price].empty()){
-            ask.erase(to_cancel.price);
-        }
+        auto [price,idx] =  Order_index[req.id];
+        ask[conv_price_to_idx(price)][idx].cancelled = true;
+        ask_actv_count[conv_price_to_idx(price)]--;  
     }
-    Order_info.erase(to_cancel.id);
-    Order_iterator.erase(to_cancel.id);
-    return -1;
+    Order_info[req.id].cancelled = true;
+    return - 1;
     
 }
 
@@ -96,84 +123,101 @@ int cancel_order(CancelOrderRequest req){
 
 optional<NewOrderRequest> matching_loop(NewOrderRequest req){
         if(req.side == Side::Bid){
-              for(auto item = ask.begin();item != ask.end();){
-                 auto best_ask = item -> first;
-
-                 if(best_ask <= req.price){
-                      for(auto it =  (item -> second).begin();it != (item -> second).end();){
-                         auto ptr = *it;
-
+              for(int idx = best_ask_indx;idx < ask.size();++idx){
+                 double price = conv_idx_to_price(idx) ;
+                 if(ask_actv_count[idx] == 0){
+                    continue;
+                 }
+                 if(price <= req.price ){
+                      for(auto &item : ask[idx]){
+                         if(item.cancelled){   //break if item cancelled
+                            continue;
+                         }
                          if(req.quantity == 0){
                             break;
                          }
-                         if(ptr -> quantity > req.quantity){
-                            ptr -> quantity -= req.quantity;
-                            Trade_log.push_back(Trade{best_ask,req.quantity,id_gen,ptr -> id});
+                         if(item.quantity > req.quantity){
+                            item.quantity -= req.quantity;
+                            //Trade_log.push_back(Trade{price,req.quantity,id_gen,item.id});
                             req.quantity = 0;
                             
                             break;
                          }
                          else{
-                            req.quantity -= ptr -> quantity;
-                            int cancel_id = ptr -> id;
-                            Trade_log.push_back(Trade{best_ask,ptr->quantity,id_gen,ptr -> id});
-                            it = (item -> second).erase(it);  
-                            Order_info.erase(cancel_id);
-                            Order_iterator.erase(cancel_id);
+                            req.quantity -= item.quantity;
+                           // Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
+                            item.cancelled = true;
+                            ask_actv_count[idx]--;
                          }
                       }
-                      if((item -> second).empty()){
-                        item = ask.erase(item);
-                      }else{
-                        item++;
-                      }
+                      
                  }
                  else{
                     break;
                  }
-                 
                 
               }
         }
 
         else if(req.side == Side::Ask){
-              for(auto item = bid.begin();item != bid.end();){
-                 auto best_bid = item -> first;
-
-                 if(best_bid >= req.price){
-                      for(auto it =  (item -> second).begin();it != (item -> second).end();){
-                         auto ptr = *it;
-
+             for(int idx = best_bid_index;idx >= 0;--idx){
+                  double price = conv_idx_to_price(idx);
+                 if(bid_actv_count[idx] == 0){
+                    continue;;
+                 }
+                 if(price >= req.price ){
+                      for(auto &item : bid[idx]){
+                         if(item.cancelled){   //move to next order if item cancelled
+                            continue;
+                         }
                          if(req.quantity == 0){
                             break;
                          }
-                         if(ptr -> quantity > req.quantity){
-                            ptr -> quantity -= req.quantity;
-                            Trade_log.push_back(Trade{best_bid,req.quantity,id_gen,ptr -> id});
+                         if(item.quantity > req.quantity){
+                            item.quantity -= req.quantity;
+
+                          //  Trade_log.push_back(Trade{price,req.quantity,id_gen,item.id});
                             req.quantity = 0;
+                            
                             break;
                          }
                          else{
-                            req.quantity -= ptr -> quantity;
-                            int cancel_id = ptr -> id;
-                            Trade_log.push_back(Trade{best_bid,ptr->quantity,id_gen,ptr -> id});
-                            it = (item -> second).erase(it);  
-                            Order_info.erase(cancel_id);
-                            Order_iterator.erase(cancel_id);
+                            req.quantity -= item.quantity;
+                            int cancel_id = item.id;
+
+                           // Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
+                            item.cancelled = true;
+                            bid_actv_count[idx]--;
                          }
                       }
-                      if((item -> second).empty()){
-                        item = bid.erase(item);
-                      }else{
-                        item++;
-                      }
+                      
                  }
-                 else{
+                 else {
                     break;
                  }
+
                  
                 
               }
+        }
+
+
+        if(ask_actv_count[best_ask_indx] == 0){
+            for(int idx = best_ask_indx;idx < ask.size();++idx){
+                if(ask_actv_count[idx] != 0){
+                    best_ask_indx = idx;
+                    break;
+                }
+            }
+        }
+
+        if(bid_actv_count[best_bid_index] == 0){
+            for(int idx = best_bid_index;idx >= 0;--idx){
+                if(bid_actv_count[idx] != 0){
+                    best_bid_index = idx;
+                    break;
+                }
+            }
         }
 
         if(req.quantity > 0){
@@ -261,13 +305,7 @@ void benchmark(int n) {
 
 
 int main(){
-     benchmark(100000);
 
-
-
-
-
-
-
-
+   benchmark(100000);
+   cout<<sizeof(Order)<<endl;
 }

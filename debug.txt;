@@ -1,0 +1,57 @@
+ process_order(NewOrderRequest({40,20,Side::Bid}));
+    process_order(NewOrderRequest({40,30,Side::Bid}));
+    
+    cout<<"BID"<<endl;
+    for(auto items : bid){
+ for(auto ptr : items){
+             if(!ptr.cancelled){
+                cout<<ptr.id<<" "<<ptr.quantity<<" ";
+             }
+        }
+        if(!items.empty()) cout<<endl;
+    }
+    cout<<"ASK"<<endl;
+    for(auto items : ask){
+        for(auto ptr : items){
+             if(!ptr.cancelled){
+                cout<<ptr.id<<" "<<ptr.quantity<<" ";
+             }
+        }
+        if(!items.empty()) cout<<endl;
+    }
+
+    
+    process_order(MarketOrderRequest({40,Side::Ask}));
+     
+     
+
+
+    cout<<"-----------------------CHECK------------------------"<<endl;
+    cout<<endl;
+    
+    cout<<"BID"<<endl;
+    for(auto items : bid){
+ for(auto ptr : items){
+             if(!ptr.cancelled){
+                cout<<ptr.id<<" "<<ptr.quantity<<" ";
+             }
+        }
+        if(!items.empty()) cout<<endl;
+    }
+    cout<<"ASK"<<endl;
+    for(auto items : ask){
+ for(auto ptr : items){
+             if(!ptr.cancelled){
+                cout<<ptr.id<<" "<<ptr.quantity<<" ";
+             }
+        }
+        if(!items.empty()) cout<<endl;
+    }
+         cout<<endl;
+    cout<<"Price"<<" "<<"Quant"<<" "<<"Aggressor_id"<<" "<<"Rest_id" << endl;
+    for(auto items :Trade_log){
+
+        
+        cout<<items.price<<" "<<items.quantity<<" "<<items.aggressor_id<<" "<<items.rest_id<<endl;
+    }
+    
