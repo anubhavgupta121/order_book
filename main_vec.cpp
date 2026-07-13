@@ -60,6 +60,8 @@ vector<vector<Order>> ask(conv_price_to_idx(max_price) + 5 );
 vector<vector<Order>> bid(conv_price_to_idx(max_price) + 5);
 vector<int> ask_actv_count(conv_price_to_idx(max_price) + 5);
 vector<int> bid_actv_count(conv_price_to_idx(max_price) + 5);
+vector<int> activ_bid_idx;
+vector<int> activ_ask_idx;
 unordered_map<int,pair<double,int>> Order_index;
 
 vector<Trade> Trade_log;
@@ -110,18 +112,19 @@ int add_order(NewOrderRequest req){
             bid[idx].push_back(new_order);
             Order_index[new_order.id] =  {req.price,bid[idx].size() - 1};
             bid_actv_count[idx]++;
-            if(idx > best_bid_index || bid[best_bid_index].empty()){
-                best_bid_index = idx;
+            if(bid_actv_count[idx] == 1){
+            auto ins = lower_bound(activ_bid_idx.begin(),activ_bid_idx.end(),idx);
+            activ_bid_idx.insert(ins,idx);
             }
-            
      }
      else if(new_order.side == Side::Ask){
             int idx = conv_price_to_idx(req.price);
             ask[idx].push_back(new_order);
             Order_index[new_order.id] =  {req.price,ask[idx].size() - 1};
             ask_actv_count[idx]++;
-            if(idx < best_ask_indx || ask[best_ask_indx].empty()){
-                best_ask_indx = idx;
+            if(ask_actv_count[idx] == 1){
+            auto ins = lower_bound(activ_ask_idx.begin(),activ_ask_idx.end(),idx);
+            activ_ask_idx.insert(ins,idx);
             }
             
      }
@@ -133,13 +136,24 @@ int cancel_order(CancelOrderRequest req){
     Order to_cancel = Order_info[req.id];
     if(to_cancel.side == Side::Bid){
         auto [price,idx] =  Order_index[req.id];
-        bid[conv_price_to_idx(price)][idx].cancelled = true;
-        bid_actv_count[conv_price_to_idx(price)]--;
+        int price_index = conv_price_to_idx(price);
+        bid[price_index][idx].cancelled = true;
+        bid_actv_count[price_index]--;
+        if(bid_actv_count[price_index] == 0){
+        auto ins = lower_bound(activ_bid_idx.begin(),activ_bid_idx.end(),price_index);
+        activ_bid_idx.erase(ins);
+        }
+        
     }
     else if(to_cancel.side == Side::Ask){
         auto [price,idx] =  Order_index[req.id];
-        ask[conv_price_to_idx(price)][idx].cancelled = true;
-        ask_actv_count[conv_price_to_idx(price)]--;  
+        int price_index = conv_price_to_idx(price);
+        ask[price_index][idx].cancelled = true;
+        ask_actv_count[price_index]--;
+        if(ask_actv_count[price_index] == 0){
+        auto ins = lower_bound(activ_ask_idx.begin(),activ_ask_idx.end(),price_index);
+        activ_ask_idx.erase(ins);
+        }
     }
     Order_info[req.id].cancelled = true;
     return - 1;
@@ -150,14 +164,12 @@ int cancel_order(CancelOrderRequest req){
 
 optional<NewOrderRequest> matching_loop(NewOrderRequest req){
         if(req.side == Side::Bid){
-              for(int idx = best_ask_indx;idx < ask.size();++idx){
+              for(auto it = activ_ask_idx.begin();it != activ_ask_idx.end();){
+                 int idx = (*it);
                  double price = conv_idx_to_price(idx) ;
-                 if(ask_actv_count[idx] == 0){
-                    continue;
-                 }
                  if(price <= req.price ){
                       for(auto &item : ask[idx]){
-                         if(item.cancelled){   
+                         if(item.cancelled){   //break if item cancelled
                             continue;
                          }
                          if(req.quantity == 0){
@@ -177,6 +189,11 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                             ask_actv_count[idx]--;
                          }
                       }
+                      if(ask_actv_count[idx] == 0){
+                          it = activ_ask_idx.erase(it);
+                      }else{
+                          it++;
+                      }
                       
                  }
                  else{
@@ -187,14 +204,12 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
         }
 
         else if(req.side == Side::Ask){
-             for(int idx = best_bid_index;idx >= 0;--idx){
+              for(auto it = activ_bid_idx.begin();it != activ_bid_idx.end();){
+                  int idx = (*it);
                   double price = conv_idx_to_price(idx);
-                 if(bid_actv_count[idx] == 0){
-                    continue;;
-                 }
                  if(price >= req.price ){
                       for(auto &item : bid[idx]){
-                         if(item.cancelled){  
+                         if(item.cancelled){   
                             continue;
                          }
                          if(req.quantity == 0){
@@ -212,10 +227,15 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                             req.quantity -= item.quantity;
                             int cancel_id = item.id;
 
-                            Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
+                           Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
                             item.cancelled = true;
                             bid_actv_count[idx]--;
                          }
+                      }
+                      if(bid_actv_count[idx] == 0){
+                          it = activ_bid_idx.erase(it);
+                      }else{
+                          it++;
                       }
                       
                  }
@@ -229,23 +249,8 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
         }
 
 
-        if(ask_actv_count[best_ask_indx] == 0){
-            for(int idx = best_ask_indx;idx < ask.size();++idx){
-                if(ask_actv_count[idx] != 0){
-                    best_ask_indx = idx;
-                    break;
-                }
-            }
-        }
+            
 
-        if(bid_actv_count[best_bid_index] == 0){
-            for(int idx = best_bid_index;idx >= 0;--idx){
-                if(bid_actv_count[idx] != 0){
-                    best_bid_index = idx;
-                    break;
-                }
-            }
-        }
 
         if(req.quantity > 0){
             return NewOrderRequest(req);
@@ -313,6 +318,9 @@ mt19937 rng;
         return NewOrderRequest{0,0,Side::Bid};
     }
     
+
+
+
 
 
 

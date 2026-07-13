@@ -251,7 +251,7 @@ int process_order(Request request) {
 mt19937 rng;
  Request random_request() {
     
-    uniform_int_distribution<int> price_dist(1,10000);
+    uniform_real_distribution<double> price_dist(95.0,105.0);
     uniform_int_distribution<int> qty_dist(1, 100);
     uniform_int_distribution<int> type_dist(1, 10);
     
@@ -264,7 +264,7 @@ mt19937 rng;
         
         if (type <= 8 || active_ids.empty()) {
             return NewOrderRequest{
-                (double)price_dist(rng),
+                price_dist(rng),
                 qty_dist(rng),
                 side
             };
