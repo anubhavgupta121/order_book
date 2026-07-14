@@ -88,7 +88,6 @@ Map is competitive only when active price levels are few and stable. As levels i
 ## Known limitations
 
 - Cancel orders are excluded from the multithreaded benchmark — the producer cannot know order IDs assigned by the matching engine without a separate feedback queue
-- Lazy deletion accumulates stale entries in price level vectors over time — a compaction pass would be needed in production
 - Tick size and price range are set at the top of each file — a production engine would take these from an instrument definition at startup
 
 ## How to run
@@ -123,4 +122,3 @@ To change the benchmark scenario, adjust `price_dist`, `max_price`, and `tick_si
 - Output SPSC queue from matching engine to a market data publisher thread
 - CPU core pinning for producer and consumer threads to eliminate scheduling jitter
 - Replace `Order_info` map with a flat array indexed by order ID for O(1) cancel lookup
-- Raft consensus layer on top of my distributed KV store for comparison
