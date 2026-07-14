@@ -89,6 +89,7 @@ Map is competitive only when active price levels are few and stable. As levels i
 
 - Cancel orders are excluded from the multithreaded benchmark — the producer cannot know order IDs assigned by the matching engine without a separate feedback queue
 - Tick size and price range are set at the top of each file — a production engine would take these from an instrument definition at startup
+- Sorted active level maintenance is O(n) per insert/cancel — fine for typical books, degrades with very large number of active levels.
 
 ## How to run
 
