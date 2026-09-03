@@ -2,54 +2,58 @@
 #include <random>
 #include <variant>
 #include <thread>
-
-
-
+#include <fstream>
+#include <sstream>
+ 
+ 
+ 
 using namespace std;
-
-
-
+ 
+ 
+ 
 enum class Side{Bid,Ask};
-
-
+ 
+ 
 struct Trade{
     double price;
     int quantity;
     int aggressor_id;
     int rest_id;
-
+ 
 };
-
+ 
 struct Order {
     int id;
     int quantity;
     Side side;
     bool cancelled;
 };
-
+ 
 struct NewOrderRequest{
     double price;
     int quantity;
     Side side;
 };
-
+ 
 struct CancelOrderRequest{
     int id;
 };
-
-
+ 
+ 
 struct MarketOrderRequest{
     int quantity;
     Side side;
 };
-
+ 
 double Min_price = 0;
 double max_price = 105;
 double tick_size = 0.01;
-
-
+ 
+ 
 int conv_price_to_idx(double price){
-     return (price - Min_price)/tick_size;
+     // FIX: round instead of truncate to avoid float precision errors
+     // mapping a price to the wrong tick (e.g. 100.01/0.01 -> 10000.9999 -> 10000)
+     return (int)round((price - Min_price)/tick_size);
 }
 double conv_idx_to_price(int idx){
     return (idx*tick_size) + Min_price;
@@ -63,10 +67,10 @@ vector<int> bid_actv_count(conv_price_to_idx(max_price) + 5);
 vector<int> activ_bid_idx;
 vector<int> activ_ask_idx;
 unordered_map<int,pair<double,int>> Order_index;
-
+ 
 vector<Trade> Trade_log;
-
-
+ 
+ 
 using Request = variant<NewOrderRequest, CancelOrderRequest,MarketOrderRequest>;
 int best_ask_indx = 0;
 int best_bid_index = bid.size() - 1;
@@ -74,8 +78,8 @@ struct SPSC_queue{
     array<Request,1000> arr = {};
     alignas(64) atomic<size_t> head;
     alignas(64) atomic<size_t> tail;
-
-
+ 
+ 
     bool push(Request req){
         size_t h = head.load(memory_order_acquire);
         size_t t = tail.load(memory_order_acquire);
@@ -93,7 +97,7 @@ struct SPSC_queue{
         if(t - h == 0){
             return nullopt;
         }else{
-
+ 
             Request new_req = arr[head%1000];
             head.store(h + 1,memory_order_release);
             return new_req;
@@ -101,8 +105,8 @@ struct SPSC_queue{
     
     }
 };
-
-
+ 
+ 
 int add_order(NewOrderRequest req){
      Order new_order = {id_gen,req.quantity,req.side,false};
      Order_info[new_order.id] = new_order;
@@ -159,9 +163,9 @@ int cancel_order(CancelOrderRequest req){
     return - 1;
     
 }
-
-
-
+ 
+ 
+ 
 optional<NewOrderRequest> matching_loop(NewOrderRequest req){
         if(req.side == Side::Bid){
               for(auto it = activ_ask_idx.begin();it != activ_ask_idx.end();){
@@ -202,7 +206,7 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                 
               }
         }
-
+ 
         else if(req.side == Side::Ask){
               for(auto it = activ_bid_idx.rbegin();it != activ_bid_idx.rend();){
                   int idx = (*it);
@@ -217,7 +221,7 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                          }
                          if(item.quantity > req.quantity){
                             item.quantity -= req.quantity;
-
+ 
                             Trade_log.push_back(Trade{price,req.quantity,id_gen,item.id});
                             req.quantity = 0;
                             
@@ -226,7 +230,7 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                          else{
                             req.quantity -= item.quantity;
                             int cancel_id = item.id;
-
+ 
                            Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
                             item.cancelled = true;
                             bid_actv_count[idx]--;
@@ -242,21 +246,21 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                  else {
                     break;
                  }
-
+ 
                  
                 
               }
         }
-
-
+ 
+ 
             
-
-
+ 
+ 
         if(req.quantity > 0){
             return NewOrderRequest(req);
         }
         return nullopt;
-
+ 
         
     
 }
@@ -291,7 +295,7 @@ int process_order(Request request) {
     }, request);
     return id;
 }
-
+ 
 mt19937 rng;
  Request random_request() {
     
@@ -318,13 +322,13 @@ mt19937 rng;
         return NewOrderRequest{0,0,Side::Bid};
     }
     
-
-
-
-
-
-
-
+ 
+ 
+ 
+ 
+ 
+ 
+ 
 void consumer_func(SPSC_queue &spsc_q,int N){
       int count = 0;
       while(count != N){
@@ -335,7 +339,7 @@ void consumer_func(SPSC_queue &spsc_q,int N){
           }
       }
 }
-
+ 
 void producer_func(SPSC_queue &spsc_q,int N){
      int count = 0;
      
@@ -345,9 +349,118 @@ void producer_func(SPSC_queue &spsc_q,int N){
           count++;
      }
 }
-
-
-int main(){
+ 
+ 
+// ---------------------------------------------------------------------
+// Research replay mode: read orders.csv, feed sequentially through the
+// real matching engine, and log fills + book snapshots for analysis.
+// This bypasses the SPSC queue/threading on purpose - we want deterministic
+// order and real timestamps from the file, not throughput measurement.
+// ---------------------------------------------------------------------
+ 
+struct TimedFill {
+    double timestamp;
+    int order_id;
+    int counterparty_id;
+    string side;
+    double price;
+    int quantity;
+    int is_maker;
+};
+ 
+vector<TimedFill> Timed_fills;
+ 
+string best_bid_str(){
+    if(activ_bid_idx.empty()) return "";
+    return to_string(conv_idx_to_price(activ_bid_idx.back()));
+}
+string best_ask_str(){
+    if(activ_ask_idx.empty()) return "";
+    return to_string(conv_idx_to_price(activ_ask_idx.front()));
+}
+ 
+void run_from_csv(const string& orders_path, const string& fills_path, const string& snapshots_path){
+    ifstream in(orders_path);
+    if(!in){
+        cerr << "Could not open " << orders_path << endl;
+        return;
+    }
+    ofstream snap_out(snapshots_path);
+    snap_out << "timestamp,best_bid,best_ask\n";
+ 
+    string line;
+    getline(in, line); // skip header
+ 
+    int n_processed = 0;
+    while(getline(in, line)){
+        stringstream ss(line);
+        string order_id_s, ts_s, side_s, type_s, price_s, qty_s;
+        getline(ss, order_id_s, ',');
+        getline(ss, ts_s, ',');
+        getline(ss, side_s, ',');
+        getline(ss, type_s, ',');
+        getline(ss, price_s, ',');
+        getline(ss, qty_s, ',');
+ 
+        double ts = stod(ts_s);
+        Side side = (side_s == "BUY") ? Side::Bid : Side::Ask;
+        int qty = stoi(qty_s);
+ 
+        // snapshot BEFORE processing this order (pre-trade book state)
+        snap_out << ts << "," << best_bid_str() << "," << best_ask_str() << "\n";
+ 
+        size_t trades_before = Trade_log.size();
+        int this_order_id;
+ 
+        if(type_s == "MARKET"){
+            id_gen++;
+            this_order_id = id_gen;
+            NewOrderRequest sentinel;
+            if(side == Side::Bid) sentinel = {999999999.0, qty, side};
+            else sentinel = {0.0, qty, side};
+            matching_loop(sentinel); // leftover qty discarded - market orders don't rest
+        } else {
+            double price = stod(price_s);
+            // clamp defensively to the engine's valid price range to avoid OOB access
+            price = max(Min_price, min(max_price, price));
+            id_gen++;
+            this_order_id = id_gen;
+            auto matched = matching_loop(NewOrderRequest{price, qty, side});
+            if(matched) add_order(*matched);
+        }
+ 
+        // any Trade_log entries appended during this call belong to this order
+        for(size_t i = trades_before; i < Trade_log.size(); i++){
+            const auto& t = Trade_log[i];
+            Timed_fills.push_back({ts, this_order_id, t.rest_id, side_s, t.price, t.quantity, 0});
+        }
+        n_processed++;
+    }
+ 
+    ofstream fout(fills_path);
+    fout << "fill_id,order_id,timestamp,side,price,quantity,is_maker\n";
+    for(size_t i = 0; i < Timed_fills.size(); i++){
+        const auto& f = Timed_fills[i];
+        fout << (i+1) << "," << f.order_id << "," << f.timestamp << "," << f.side << ","
+             << f.price << "," << f.quantity << "," << f.is_maker << "\n";
+    }
+ 
+    cout << "Processed " << n_processed << " orders from " << orders_path << endl;
+    cout << "Wrote " << Timed_fills.size() << " fills to " << fills_path << endl;
+    cout << "Wrote " << n_processed << " snapshots to " << snapshots_path << endl;
+}
+ 
+ 
+int main(int argc, char** argv){
+    if(argc >= 2 && string(argv[1]) == "--replay"){
+        string orders_path = argc >= 3 ? argv[2] : "orders.csv";
+        string fills_path = argc >= 4 ? argv[3] : "fills.csv";
+        string snapshots_path = argc >= 5 ? argv[4] : "book_snapshots.csv";
+        run_from_csv(orders_path, fills_path, snapshots_path);
+        return 0;
+    }
+ 
+    // original throughput benchmark (unchanged)
     auto start = chrono::high_resolution_clock::now();
     SPSC_queue spsc_q{.head = 0,.tail = 0};
     int n = 100000;
@@ -355,8 +468,8 @@ int main(){
     thread consumer_t(consumer_func,ref(spsc_q),n);
     producer_t.join();
     consumer_t.join();
-
-
+ 
+ 
     auto end = chrono::high_resolution_clock::now();
     auto duration = chrono::duration_cast<chrono::microseconds>(end - start);
     
@@ -366,3 +479,6 @@ int main(){
     cout << "Throughput: " << (long long)n * 1000000 / duration.count() << " orders/sec" << endl;
     
 }
+ 
+
+
