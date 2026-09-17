@@ -91,15 +91,15 @@ Running the current `orders.csv` through the fixed engine and analyzing the outp
 | Market order slippage | mean 0.0106, median 0.0100 (adverse to the taker, roughly one tick) |
 | Price impact after a marketable trade | approximately zero in this sample |
 
-![Quoted spread over time](report/spread_over_time.png)
+![Quoted spread over time](main_analysis/report/spread_over_time.png)
 
 The spread mostly sits between one and three ticks, with occasional widening to five or six ticks during periods of thinner resting liquidity. This is consistent with the exponential price-offset distribution used to generate resting limit orders.
 
-![Time-to-fill distribution](report/time_to_fill_hist.png)
+![Time-to-fill distribution](main_analysis/report/time_to_fill_hist.png)
 
 Fill times are heavily right-skewed: most fills happen effectively immediately, with a long, thin tail out to half a millisecond. This matches expectations for orders that cross the spread on arrival versus ones that wait for the market to move to them.
 
-![Market order slippage distribution](report/slippage_hist.png)
+![Market order slippage distribution](main_analysis/report/slippage_hist.png)
 
 Slippage clusters around 0.005 to 0.015, roughly half a tick to one and a half ticks, and is consistently positive (adverse to the taker), which is the expected direction for an aggressor crossing a live spread.
 
