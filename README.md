@@ -75,7 +75,11 @@ Benchmarks confirm throughput, but say nothing about whether the matching logic 
 
 Replaying this flow surfaced a real bug. The sell-side branch of `matching_loop` iterated resting bids (`activ_bid_idx`) starting from `begin()`, which is the **lowest** price in that sorted list. But a sell order should match against the **highest** bid first, and the bids that qualify (`price >= req.price`) sit at the end of that ascending list, not the start. Iterating from the front meant the loop could reach a low, non-qualifying bid, hit the `else { break; }`, and exit before ever checking a higher bid that should have matched. The result was resting orders left on both sides of a price that should have crossed: a crossed book.
 
-The fix reverses the iteration for that branch, matching from the highest bid down (`activ_bid_idx.rbegin()` to `rend()`), with the corresponding erase adjusted for a reverse iterator. Every replay run since the fix has confirmed zero crossed states across the recorded book snapshots.
+The fix reverses the iteration for that branch, matching from the highest bid down (`activ_bid_idx.rbegin()` to `rend()`), with the corresponding erase adjusted for a reverse iterator.
+
+Tightening the check from "crossed" (`bid > ask`) to "crossed or locked" (`bid >= ask`) surfaced a second bug. In 133 of 3,000 snapshots the best bid equalled the best ask, which a matching engine should never allow. The cause was floating point: `conv_idx_to_price(9999)` returns `99.99000000000001`, so an incoming buy at `99.99` failed `price <= req.price` and rested instead of trading. The matching loop now compares integer tick indices (`idx <= limit_idx(req.price)`) and never compares doubles. After the fix, replay shows 0 crossed and 0 locked states.
+
+A third fix guards cancels: a resting order that had been fully filled could still be cancelled, which decremented its level's active count a second time and could drop a live price level from the active index.
 
 **Note on methodology.** `generate_order_flow.py` and `analyze_results.py` were written with AI assistance to a specification I set. The matching engine itself (`ob.cpp`, `main.cpp`, `main_map.cpp`, `main_sorted_vec.cpp`) is my own design and implementation, and the bug described above was found by reading the engine's actual output, not the tooling around it.
 
@@ -85,11 +89,13 @@ Running the current `orders.csv` through the fixed engine and analyzing the outp
 
 | Metric | Value |
 |---|---|
-| Orders filled (at least partially) | 925 of 3,000 (30.8% by count, 29.2% by volume) |
-| Time to fill, limit orders | median 0.00 ms, p90 0.17 ms, p99 0.47 ms |
-| Quoted spread | mean 0.0185, median 0.0100 |
-| Market order slippage | mean 0.0106, median 0.0100 (adverse to the taker, roughly one tick) |
-| Price impact after a marketable trade | approximately zero in this sample |
+| Crossed / locked book states | 0 / 0 of 2,998 two-sided snapshots |
+| Orders filled (at least partially, either side of the trade) | 1,778 of 3,000 (59.3% by count, 58.5% by volume) |
+| Time to fill, limit orders that rested in the book | median 7.3 s, p90 61 s, p99 116 s (875 orders) |
+| Limit orders filled on arrival (crossed the spread) | 450 |
+| Quoted spread | mean 0.0196, median 0.0200 |
+| Market order slippage | mean 0.0110, median 0.0100 (adverse to the taker, roughly one tick) |
+| Price impact after a market order | mean 0.0017, median 0.0000 |
 
 ![Quoted spread over time](main_analysis/report/spread_over_time.png)
 
@@ -97,13 +103,13 @@ The spread mostly sits between one and three ticks, with occasional widening to 
 
 ![Time-to-fill distribution](main_analysis/report/time_to_fill_hist.png)
 
-Fill times are heavily right-skewed: most fills happen effectively immediately, with a long, thin tail out to half a millisecond. This matches expectations for orders that cross the spread on arrival versus ones that wait for the market to move to them.
+This histogram covers only orders that rested and were later hit, logged as the maker side of a fill. Waits are heavily right-skewed. Orders near the touch fill within a few seconds (tens of arrivals at one order per 50 ms), while orders placed deeper wait until the random-walk mid drifts to them. An earlier version of this pipeline logged only the aggressor side of each trade and printed timestamps with 6 significant digits, which made every fill look instantaneous.
 
 ![Market order slippage distribution](main_analysis/report/slippage_hist.png)
 
 Slippage clusters around 0.005 to 0.015, roughly half a tick to one and a half ticks, and is consistently positive (adverse to the taker), which is the expected direction for an aggressor crossing a live spread.
 
-**Caveat.** The 30.8% fill rate and near-zero price impact are properties of this particular synthetic order flow, not general claims about the engine. Many resting limit orders in the generator are placed well away from the mid and simply never get reached in a short simulation window, and market order sizes here are small relative to resting depth, so they rarely walk through more than one price level. Neither number should be read as a benchmark of engine quality; the point of this exercise was correctness and directional sanity checks, not calibration against real market data.
+**Caveat.** The 59% fill rate and small price impact are properties of this particular synthetic order flow, not general claims about the engine. Many resting limit orders in the generator are placed well away from the mid and simply never get reached in a short simulation window, and market order sizes here are small relative to resting depth, so they rarely walk through more than one price level. Neither number should be read as a benchmark of engine quality; the point of this exercise was correctness and directional sanity checks, not calibration against real market data.
 
 ## Known limitations
 

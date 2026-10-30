@@ -65,14 +65,35 @@ def fill_rate(orders: pd.DataFrame, fills: pd.DataFrame) -> dict:
     }
 
 
-def time_to_fill(orders: pd.DataFrame, fills: pd.DataFrame) -> pd.Series:
+def time_to_fill(orders: pd.DataFrame, fills: pd.DataFrame, rested_only: bool = False) -> pd.Series:
+    """Time from submission to first fill for LIMIT orders.
+
+    rested_only=True keeps only fills where the order was the resting (maker)
+    side, i.e. it actually waited in the book. Otherwise a limit order that
+    crosses the spread on arrival counts as a 0 ms fill.
+    """
     limit_orders = orders[orders["type"] == "LIMIT"][["order_id", "timestamp"]].rename(
         columns={"timestamp": "submit_time"}
     )
-    first_fill = fills.groupby("order_id")["timestamp"].min().rename("first_fill_time")
+    f = fills
+    if rested_only:
+        if "is_maker" not in fills.columns:
+            return pd.Series(dtype=float)
+        f = fills[fills["is_maker"] == 1]
+    first_fill = f.groupby("order_id")["timestamp"].min().rename("first_fill_time")
     merged = limit_orders.merge(first_fill, on="order_id", how="inner")
     merged["ttf_ms"] = merged["first_fill_time"] - merged["submit_time"]
     return merged["ttf_ms"].clip(lower=0)
+
+
+def book_sanity(snapshots: pd.DataFrame) -> dict:
+    """A correct book is never crossed (bid > ask) or locked (bid == ask)."""
+    eps = 1e-9
+    return {
+        "crossed": int((snapshots["best_bid"] > snapshots["best_ask"] + eps).sum()),
+        "locked": int(((snapshots["best_bid"] - snapshots["best_ask"]).abs() <= eps).sum()),
+        "snapshots_checked": int(len(snapshots)),
+    }
 
 
 def nearest_snapshot(snapshots: pd.DataFrame, ts: float, tolerance=None):
@@ -83,12 +104,26 @@ def nearest_snapshot(snapshots: pd.DataFrame, ts: float, tolerance=None):
     return snapshots.iloc[idx]
 
 
+def next_snapshot(snapshots: pd.DataFrame, ts: float):
+    """Return the first snapshot strictly after ts.
+
+    Snapshots are written *before* each order is processed, so the snapshot
+    taken for the next order is the book state right after this one.
+    """
+    idx = snapshots["timestamp"].searchsorted(ts, side="right")
+    if idx >= len(snapshots):
+        return None
+    return snapshots.iloc[idx]
+
+
 def slippage_and_impact(orders: pd.DataFrame, fills: pd.DataFrame, snapshots: pd.DataFrame):
     market_orders = orders[orders["type"] == "MARKET"]
     results = []
 
     for _, order in market_orders.iterrows():
         order_fills = fills[fills["order_id"] == order["order_id"]]
+        if "is_maker" in order_fills.columns:
+            order_fills = order_fills[order_fills["is_maker"] == 0]
         if order_fills.empty:
             continue
 
@@ -101,9 +136,10 @@ def slippage_and_impact(orders: pd.DataFrame, fills: pd.DataFrame, snapshots: pd
         mid_before = pre["mid"]
         slip = (vwap - mid_before) if order["side"] == "BUY" else (mid_before - vwap)
 
-        # price impact: mid a short time after the last fill vs. mid before
-        last_fill_ts = order_fills["timestamp"].max()
-        post = nearest_snapshot(snapshots, last_fill_ts + 1e-6)
+        # price impact: mid right after this order vs. mid before it.
+        # (The old lookup, nearest_snapshot(last_fill_ts + 1e-6), landed on the
+        # same pre-trade snapshot as `pre`, so impact was always exactly 0.)
+        post = next_snapshot(snapshots, order["timestamp"])
         impact = None
         if post is not None:
             impact = (post["mid"] - mid_before) if order["side"] == "BUY" else (mid_before - post["mid"])
@@ -138,7 +174,7 @@ def make_plots(snapshots, ttf, slip_df, outdir):
         plt.hist(ttf, bins=40)
         plt.xlabel("Time to fill (ms)")
         plt.ylabel("Count")
-        plt.title("Time-to-fill distribution (limit orders)")
+        plt.title("Time-to-fill distribution (limit orders that rested)")
         plt.tight_layout()
         plt.savefig(os.path.join(outdir, "time_to_fill_hist.png"), dpi=130)
         plt.close()
@@ -174,14 +210,34 @@ def main():
     if len(ttf) > 0:
         print()
         print("=" * 50)
-        print("TIME TO FILL (limit orders, ms)")
+        print("TIME TO FILL (all filled limit orders, ms)")
         print("=" * 50)
+        print(f"  n:      {len(ttf)}  ({(ttf == 0).sum()} filled on arrival)")
         print(f"  median: {ttf.median():.2f}")
         print(f"  p90:    {ttf.quantile(0.9):.2f}")
         print(f"  p99:    {ttf.quantile(0.99):.2f}")
 
+    ttf_rest = time_to_fill(orders, fills, rested_only=True)
+    if len(ttf_rest) > 0:
+        print()
+        print("=" * 50)
+        print("TIME TO FILL (limit orders that rested in the book, ms)")
+        print("=" * 50)
+        print(f"  n:      {len(ttf_rest)}")
+        print(f"  median: {ttf_rest.median():.2f}")
+        print(f"  p90:    {ttf_rest.quantile(0.9):.2f}")
+        print(f"  p99:    {ttf_rest.quantile(0.99):.2f}")
+        ttf = ttf_rest  # plot the informative distribution
+
     slip_df = pd.DataFrame()
     if snapshots is not None:
+        print()
+        print("=" * 50)
+        print("BOOK SANITY (should both be 0)")
+        print("=" * 50)
+        for k, v in book_sanity(snapshots).items():
+            print(f"  {k}: {v}")
+
         print()
         print("=" * 50)
         print("QUOTED SPREAD")

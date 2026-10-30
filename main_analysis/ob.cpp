@@ -58,6 +58,16 @@ int conv_price_to_idx(double price){
 double conv_idx_to_price(int idx){
     return (idx*tick_size) + Min_price;
 }
+// Limit price -> tick index for matching. Compare tick indices, never doubles:
+// conv_idx_to_price(9999) is 99.99000000000001, so `price <= 99.99` was false
+// and a buy at 99.99 would not match a resting ask at 99.99 (a locked book).
+// Clamped so the market-order sentinels (0 and 999999999) don't overflow int.
+int limit_idx(double price){
+    double raw = std::round((price - Min_price)/tick_size);
+    if(raw < 0) return -1;
+    if(raw > INT_MAX / 2) return INT_MAX / 2;
+    return (int)raw;
+}
 int id_gen = 0;
 map<int,Order> Order_info;
 vector<vector<Order>> ask(conv_price_to_idx(max_price) + 5 );
@@ -138,6 +148,9 @@ int add_order(NewOrderRequest req){
 int cancel_order(CancelOrderRequest req){
     
     Order to_cancel = Order_info[req.id];
+    // Already filled or already cancelled: without this guard the level's
+    // active count is decremented twice and a live level can be erased.
+    if(to_cancel.cancelled) return -1;
     if(to_cancel.side == Side::Bid){
         auto [price,idx] =  Order_index[req.id];
         int price_index = conv_price_to_idx(price);
@@ -167,11 +180,12 @@ int cancel_order(CancelOrderRequest req){
  
  
 optional<NewOrderRequest> matching_loop(NewOrderRequest req){
+        const int req_idx = limit_idx(req.price);
         if(req.side == Side::Bid){
               for(auto it = activ_ask_idx.begin();it != activ_ask_idx.end();){
                  int idx = (*it);
                  double price = conv_idx_to_price(idx) ;
-                 if(price <= req.price ){
+                 if(idx <= req_idx){
                       for(auto &item : ask[idx]){
                          if(item.cancelled){   //break if item cancelled
                             continue;
@@ -190,6 +204,7 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
                             req.quantity -= item.quantity;
                             Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
                             item.cancelled = true;
+                            Order_info[item.id].cancelled = true;
                             ask_actv_count[idx]--;
                          }
                       }
@@ -211,7 +226,7 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
               for(auto it = activ_bid_idx.rbegin();it != activ_bid_idx.rend();){
                   int idx = (*it);
                   double price = conv_idx_to_price(idx);
-                 if(price >= req.price ){
+                 if(idx >= req_idx){
                       for(auto &item : bid[idx]){
                          if(item.cancelled){   
                             continue;
@@ -233,6 +248,7 @@ optional<NewOrderRequest> matching_loop(NewOrderRequest req){
  
                            Trade_log.push_back(Trade{price,item.quantity,id_gen,item.id});
                             item.cancelled = true;
+                            Order_info[item.id].cancelled = true;
                             bid_actv_count[idx]--;
                          }
                       }
@@ -407,7 +423,7 @@ void run_from_csv(const string& orders_path, const string& fills_path, const str
         int qty = stoi(qty_s);
  
         // snapshot BEFORE processing this order (pre-trade book state)
-        snap_out << ts << "," << best_bid_str() << "," << best_ask_str() << "\n";
+        snap_out << setprecision(10) << ts << "," << best_bid_str() << "," << best_ask_str() << "\n";
  
         size_t trades_before = Trade_log.size();
         int this_order_id;
@@ -432,16 +448,22 @@ void run_from_csv(const string& orders_path, const string& fills_path, const str
         // any Trade_log entries appended during this call belong to this order
         for(size_t i = trades_before; i < Trade_log.size(); i++){
             const auto& t = Trade_log[i];
+            // aggressor (taker) row
             Timed_fills.push_back({ts, this_order_id, t.rest_id, side_s, t.price, t.quantity, 0});
+            // resting (maker) row: without it, orders that waited in the book
+            // never show up as filled and time-to-fill is always ~0
+            string maker_side = (side == Side::Bid) ? "SELL" : "BUY";
+            Timed_fills.push_back({ts, t.rest_id, this_order_id, maker_side, t.price, t.quantity, 1});
         }
         n_processed++;
     }
  
     ofstream fout(fills_path);
-    fout << "fill_id,order_id,timestamp,side,price,quantity,is_maker\n";
+    fout << setprecision(10);  // default 6 significant digits turned 152203.634 into 152204
+    fout << "fill_id,order_id,counterparty_id,timestamp,side,price,quantity,is_maker\n";
     for(size_t i = 0; i < Timed_fills.size(); i++){
         const auto& f = Timed_fills[i];
-        fout << (i+1) << "," << f.order_id << "," << f.timestamp << "," << f.side << ","
+        fout << (i+1) << "," << f.order_id << "," << f.counterparty_id << "," << f.timestamp << "," << f.side << ","
              << f.price << "," << f.quantity << "," << f.is_maker << "\n";
     }
  

@@ -87,7 +87,7 @@ def main():
     parser.add_argument("--n", type=int, default=5000, help="number of orders")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--start-price", type=float, default=100.0)
-    parser.add_argument("--tick-size", type=float, default=0.05)
+    parser.add_argument("--tick-size", type=float, default=0.01)
     parser.add_argument("--out", type=str, default="orders.csv")
     args = parser.parse_args()
 
